@@ -1,3 +1,9 @@
+bench_conv_addr_gen:
+  deps:
+    - conv_addr_gen.sv
+    - tb_conv_addr_gen.sv
+  top: tb_conv_addr_gen
+
 bench_matmul:
   deps:
     - pe.sv
@@ -6,3 +12,25 @@ bench_matmul:
     - matmul_controller.sv
     - tb_matmul.sv
   top: tb_matmul
+
+bench_conv2d:
+  deps:
+    - pe.sv
+    - systolic_array_4x4.sv
+    - sram_model.sv
+    - conv_addr_gen.sv
+    - conv_controller.sv
+    - tb_conv2d.sv
+  top: tb_conv2d
+
+bench_top_accel:
+  deps:
+    - pe.sv
+    - systolic_array_4x4.sv
+    - sram_model.sv
+    - conv_addr_gen.sv
+    - matmul_controller.sv
+    - conv_controller.sv
+    - top_accel.sv
+    - tb_top_accel.sv
+  top: tb_top_accel
