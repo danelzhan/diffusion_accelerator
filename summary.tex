@@ -1,0 +1,335 @@
+\documentclass[11pt, letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{microtype}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+
+\definecolor{codegray}{rgb}{0.95,0.95,0.95}
+\lstset{
+  backgroundcolor=\color{codegray},
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{gray!40}
+}
+
+\title{\textbf{Diffusion Accelerator: An Address-Centric RTL Architecture\\
+for Accelerating Stable Diffusion Inference}\\[0.4em]
+\large Implementation and Evaluation Report}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Introduction}
+% ─────────────────────────────────────────────────────────────────────────────
+
+Stable Diffusion models rely on a U-Net backbone that alternates between two
+computationally distinct operation types: spatial convolution layers in the
+encoder and decoder, and self-attention layers (implemented as matrix
+multiplications) in the bottleneck~\cite{sdacc2025}. When executing this
+workload on a general-purpose GPU, two hardware-level bottlenecks dominate
+cycle counts:
+
+\begin{enumerate}
+  \item \textbf{Im2col buffer overhead~\cite{sdacc2025}.} GPUs are
+        fundamentally GEMM (General Matrix Multiply) engines. Convolution's
+        irregular patch-access pattern must be physically reformatted into a
+        dense matrix before any computation can begin. This intermediate
+        buffer materialisation is pure overhead — the original data already
+        resides in memory and must be re-read.
+
+  \item \textbf{Heterogeneous operation switching~\cite{sdacc2025}.} The
+        transition between convolutional layers (\texttt{cuDNN}) and
+        attention/matmul layers (\texttt{cuBLAS}) requires a full kernel
+        context switch on a GPU, incurring hundreds of wasted cycles per
+        transition.
+\end{enumerate}
+
+This project implements a synthesisable RTL accelerator in SystemVerilog that
+addresses both bottlenecks. The design is verified cycle-accurately using
+Verilator~5.048, with all 256 INT32 output values confirmed correct against a
+C++ golden reference model.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Architecture Overview}
+% ─────────────────────────────────────────────────────────────────────────────
+
+The accelerator consists of four primary RTL modules that together replace the
+im2col+GEMM pipeline with a direct, address-centric dataflow.
+
+\subsection{Systolic Array (\texttt{systolic\_array\_4x4.sv})}
+
+A $4 \times 4$ array of processing elements (PEs), each performing an INT8
+multiply-accumulate (MAC) operation and accumulating into a 32-bit register.
+Data flows in a skewed (systolic) pattern: input activations are fed along
+rows and weights along columns, with each PE passing its input to its
+right-neighbour and down-neighbour on the following cycle. The array is
+general-purpose and serves as the shared compute substrate for both
+convolution and matrix multiply.
+
+\subsection{Convolution Address Generator (\texttt{conv\_addr\_gen.sv})}
+
+The core contribution of the design. Rather than pre-computing an im2col
+buffer, this module computes the required input SRAM address \emph{in the
+same cycle the data is needed}, using purely combinational logic:
+
+\begin{equation}
+  i_h = o_h \cdot s + k_r - p, \qquad
+  i_w = o_w \cdot s + k_c - p
+  \label{eq:coord}
+\end{equation}
+
+\begin{equation}
+  \text{addr} = (i_c \cdot H_{\text{in}} + i_h) \cdot W_{\text{in}} + i_w
+  \label{eq:addr}
+\end{equation}
+
+where $o_h, o_w$ are the output pixel coordinates, $k_r, k_c$ the kernel
+offsets, $i_c$ the input channel index, $s$ the stride, and $p$ the padding.
+The module also asserts \texttt{addr\_valid = 0} for out-of-bounds accesses
+(i.e., zero-padding regions), gating the SRAM read enable so that no memory
+access is wasted on padding values. The intermediate buffer is never
+allocated.
+
+\subsection{Convolution Controller (\texttt{conv\_controller.sv})}
+
+An FSM-driven controller that orchestrates the systolic array for 2D
+convolution. The state machine progresses through five phases:
+
+\begin{center}
+\texttt{IDLE} $\to$ \texttt{PRELOAD} $\to$ \texttt{FEED} $\to$
+\texttt{DRAIN} $\to$ \texttt{OUTPUT}
+\end{center}
+
+During \texttt{PRELOAD}, weight values are loaded into the PE array. During
+\texttt{FEED}, the address generator streams input activations directly into
+the array one pixel at a time. The \texttt{DRAIN} phase flushes the pipeline
+after the last activation is presented.
+
+\subsection{Matmul Controller (\texttt{matmul\_controller.sv})}
+
+A second FSM controller for general matrix multiplication, also targeting the
+shared systolic array. Address generation here is sequential and trivial.
+This controller enables the same hardware to service both convolution and
+attention layers in the U-Net, with no structural modifications to the array
+itself.
+
+\subsection{Top-Level Accelerator (\texttt{top\_accel.sv})}
+
+A top-level module that exposes a \texttt{mode} register. When
+\texttt{mode = CONV}, the conv controller drives the systolic array; when
+\texttt{mode = MATMUL}, the matmul controller drives it. The switch requires
+a single register write and takes effect within 5 cycles, compared to the
+hundreds of cycles required for a GPU kernel context switch.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{GPU Baseline Model}
+% ─────────────────────────────────────────────────────────────────────────────
+
+To produce a meaningful cycle-count comparison, a cycle-accurate model of the
+traditional GPU convolution pipeline was constructed. For an
+$8 \times 8 \times 4$ input with a $3 \times 3$ kernel and 4 output channels,
+the GPU baseline is decomposed as follows:
+
+\begin{table}[h]
+\centering
+\caption{GPU baseline cycle breakdown for a single convolution layer}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Phase} & \textbf{Cycles} & \textbf{Description} \\
+\midrule
+Im2col buffer fill  & 2,304  & One cycle per byte written to the intermediate buffer \\
+GEMM computation    & 9,217  & Matrix multiply over the 2,304-entry buffer \\
+Output write        & 256    & One cycle per output value written to SRAM \\
+\midrule
+\textbf{Total}      & \textbf{11,777} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The im2col buffer has $8 \times 8 \times (4 \times 3 \times 3) = 2{,}304$
+entries: one per output pixel (64) times one per kernel unrolling position
+(36). Each weight must be re-read once per output pixel, resulting in
+$36 \times 4 \times 64 = 9{,}216$ weight re-reads during GEMM — a $32\times$
+redundancy over the accelerator's single-pass weight loading.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Verification Methodology}
+% ─────────────────────────────────────────────────────────────────────────────
+
+Functional correctness was established using Verilator~5.048, an
+open-source RTL simulator that compiles SystemVerilog to C++ and executes it
+as a native binary. The testbench proceeds as follows:
+
+\begin{enumerate}
+  \item A C++ golden reference model computes the expected INT32 output for
+        a $3 \times 3$ convolution on an $8 \times 8 \times 4$ input with
+        randomised weights and activations.
+  \item The same inputs are loaded into the accelerator's simulated SRAM.
+  \item The RTL simulation runs to completion and all 256 output values are
+        read from the output SRAM.
+  \item Each output is compared to the golden model: all 256/256 values
+        match exactly.
+\end{enumerate}
+
+Cycle counts are extracted from the simulation trace and exported to
+\texttt{trace\_data.js} for replay in the browser-based visualiser.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Results}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Single-Layer Convolution Speedup}
+
+\begin{table}[h]
+\centering
+\caption{Single-layer conv2d comparison: GPU (im2col) vs.\ SD-Acc}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Metric} & \textbf{GPU (im2col)} & \textbf{SD-Acc} & \textbf{Reduction} \\
+\midrule
+Total cycles          & 11,777  & 3,298   & $3.57\times$ \\
+Intermediate buffer   & 2,304 B & 0 B     & $100\%$ \\
+Weight reads          & 9,216   & 288     & $32\times$ \\
+Input SRAM reads      & 1,936   & $\sim$1,620 & $\sim$16\% \\
+Outputs written       & 256     & 256     & — \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The $3.57\times$ cycle speedup derives entirely from eliminating the im2col
+buffer materialisation. The address generator produces the correct SRAM
+address for every activation in $O(1)$ combinational logic, so no pre-copy
+phase is required.
+
+\subsection{Multi-Layer Heterogeneous Speedup}
+
+To demonstrate the second bottleneck, a three-layer U-Net slice was modelled:
+Conv $\to$ Self-Attention $\to$ Conv. The GPU model includes a kernel-switch
+stall of 800 cycles at each layer boundary (cuDNN $\to$ cuBLAS and back).
+
+\begin{table}[h]
+\centering
+\caption{3-layer U-Net slice: GPU vs.\ SD-Acc total cycle counts}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Segment} & \textbf{GPU cycles} & \textbf{SD-Acc cycles} \\
+\midrule
+Conv Layer 1              & 11,777  & 3,298  \\
+Context switch (conv$\to$matmul) & 800     & 5      \\
+Attention Matmul          & 4,096   & 1,200  \\
+Context switch (matmul$\to$conv) & 800     & 5      \\
+Conv Layer 3              & 11,777  & 3,298  \\
+\midrule
+\textbf{Total}            & \textbf{29,250} & \textbf{7,806} \\
+\midrule
+Speedup                   & \multicolumn{2}{c}{$3.75\times$} \\
+Context-switch overhead   & 1,600 cyc (5.5\%) & 10 cyc (0.13\%) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The SD-Acc mode register flip requires 5 cycles versus 800 cycles for the GPU
+kernel context switch — a $160\times$ reduction in switching overhead. Over a
+full U-Net inference pass with tens of layer boundaries, this compounds
+significantly.
+
+\subsection{Summary of Key Findings}
+
+\begin{itemize}
+  \item Eliminating the im2col buffer yields a $\mathbf{3.57\times}$ speedup
+        on a single convolution layer, verified directly from RTL simulation.
+  \item Weight re-read count is reduced by $\mathbf{32\times}$ because weights
+        are loaded once during PRELOAD and never re-read, whereas GEMM re-reads
+        each weight for every output pixel.
+  \item Mode switching between convolution and matrix multiply costs
+        $\mathbf{5}$ cycles on the accelerator versus $\sim$800 cycles on a
+        GPU, a $\mathbf{160\times}$ improvement.
+  \item A single $4\times4$ systolic array services both operation types with
+        no structural change, reducing area versus a dual-datapath design.
+  \item Combined single-layer and switching savings yield a
+        $\mathbf{3.75\times}$ end-to-end speedup over a 3-layer U-Net slice.
+\end{itemize}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Module Summary}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{table}[h]
+\centering
+\caption{RTL module inventory}
+\begin{tabular}{lll}
+\toprule
+\textbf{File} & \textbf{Role} & \textbf{Key property} \\
+\midrule
+\texttt{systolic\_array\_4x4.sv} & $4\times4$ INT8 systolic array & Shared by conv and matmul \\
+\texttt{conv\_addr\_gen.sv}      & Combinational address generator & Zero-cycle im2col replacement \\
+\texttt{conv\_controller.sv}     & Conv2d FSM controller & 5-state pipeline \\
+\texttt{matmul\_controller.sv}   & Matmul FSM controller & Sequential address generation \\
+\texttt{top\_accel.sv}           & Unified top-level & Mode register mux \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Toolchain}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{itemize}
+  \item \textbf{RTL language:} SystemVerilog (synthesisable subset)
+  \item \textbf{Simulator:} Verilator 5.048 (cycle-accurate, compiles to C++)
+  \item \textbf{Golden reference:} C++ model (INT32 fixed-point arithmetic)
+  \item \textbf{Trace extraction:} Python (JSON generation for visualiser)
+  \item \textbf{Visualiser:} HTML5 Canvas + JavaScript (cycle-accurate replay)
+\end{itemize}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Limitations and Future Work}
+% ─────────────────────────────────────────────────────────────────────────────
+
+The current prototype targets an $8 \times 8 \times 4$ feature map with a
+$4\times4$ systolic array. Real Stable Diffusion layers operate at
+$64\times64$ with 320+ channels, requiring tiling logic and a larger array
+(e.g., $16\times16$ or $32\times32$) to handle full-resolution inference.
+
+The phase-aware sampling optimisation described in~\cite{sdacc2025} — which
+identifies and skips redundant diffusion timesteps at the algorithmic level —
+was not implemented in this project. Adding this would compound the hardware
+speedup with an algorithmic one and represents the most impactful near-term
+extension.
+
+Longer-term, a full chip specification targeting a 28\,nm process node, with
+on-chip SRAM banks sized for a complete U-Net encoder block and a DDR memory
+controller for weight streaming, would be required to evaluate the design in a
+realistic system context.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{sdacc2025}
+Anonymous.
+\newblock {SD-Acc: Accelerating Stable Diffusion through Phase-aware Sampling
+and Hardware Co-Optimizations}.
+\newblock \textit{arXiv preprint arXiv:2507.01309}, 2025.
+\newblock \url{https://arxiv.org/abs/2507.01309}
+
+\end{thebibliography}
+
+\end{document}

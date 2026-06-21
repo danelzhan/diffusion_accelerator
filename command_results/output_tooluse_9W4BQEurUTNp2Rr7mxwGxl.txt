@@ -1,0 +1,22 @@
+=== Command: cd /Users/enluia/Documents/projects/diffusion_accelerator && python3 generate_trace.py && echo "--- trace_data.js size ---" && wc -c trace_data.js && echo "--- HTML size ---" && wc -l sim_visualizer.html (2026-06-21T17:13:44.342Z) ===
+Exit Code: 0
+Output:
+Simulating conv_controller FSM...
+  Accelerator: 3298 cycles
+Simulating im2col baseline...
+  Im2col:      11777 cycles
+
+Stats (should match hardware simulation):
+  Accel  — cycles: 3298  input_reads: 1936  weight_reads: 288  outputs:256
+  Im2col — cycles:11777  input_reads: 1936  weight_reads: 9216  buf_bytes: 2304
+
+✓ All assertions pass — matches Verilator simulation measurements
+
+Wrote trace_data.js (691,406 bytes, 1779 accel events, 2945 im2col events)
+--- trace_data.js size ---
+  691408 trace_data.js
+--- HTML size ---
+     511 sim_visualizer.html
+
+=== End Output ===
+

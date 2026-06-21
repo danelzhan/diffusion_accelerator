@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SD-Acc vs GPU — RTL Simulation Replay</title>
+<script src="trace_data.js"></script>
+<style>
+:root{--bg:#080c18;--panel:#0d1426;--border:#1e2d50;--gpu:#ff5733;--acc:#00cfff;--good:#00ff88;--warn:#ffcc00;--dim:#3a4a70;--text:#dde6ff;--sub:#7a8ab0}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;padding:16px;min-height:100vh}
+h1{text-align:center;font-size:1.4rem;letter-spacing:.1em;color:#fff;margin-bottom:4px}
+.subtitle{text-align:center;font-size:.72rem;color:var(--sub);margin-bottom:12px}
+.badge{display:inline-block;background:#0f2040;border:1px solid var(--acc);border-radius:4px;padding:2px 8px;font-size:.65rem;color:var(--acc);margin-left:8px}
+/* Tabs */
+.tabs{display:flex;gap:8px;justify-content:center;margin-bottom:16px}
+.tab-btn{background:var(--panel);border:1px solid var(--border);color:var(--sub);padding:6px 20px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:.82rem;transition:all .2s}
+.tab-btn:hover{border-color:var(--acc);color:var(--text)}
+.tab-btn.active{border-color:var(--acc);color:var(--acc);background:#0a1830}
+.tab-section{display:none}
+.tab-section.active{display:block}
+/* Controls */
+.controls{display:flex;align-items:center;gap:12px;justify-content:center;margin-bottom:16px;flex-wrap:wrap}
+button{background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 16px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:.85rem;transition:border-color .2s}
+button:hover{border-color:var(--acc)}
+button.play-btn{border-color:var(--acc);color:var(--acc)}
+.speed-wrap{display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--sub)}
+input[type=range]{accent-color:var(--acc);width:100px}
+.cyc-disp{font-size:.82rem;color:var(--warn);min-width:160px;text-align:center}
+/* Race */
+.race{display:grid;grid-template-columns:80px 1fr 120px;gap:6px;align-items:center;margin-bottom:18px}
+.race-label{font-size:.72rem;text-align:right;padding-right:8px}
+.race-label.gpu{color:var(--gpu)}
+.race-label.acc{color:var(--acc)}
+.track{background:#0d1020;border-radius:3px;height:22px;position:relative;overflow:hidden;border:1px solid var(--border)}
+.fill{height:100%;border-radius:3px;transition:width .05s linear;position:relative}
+.fill.gpu{background:linear-gradient(90deg,#7a1a08,var(--gpu))}
+.fill.acc{background:linear-gradient(90deg,#004466,var(--acc))}
+.fill-label{position:absolute;right:6px;top:50%;transform:translateY(-50%);font-size:.68rem;white-space:nowrap;text-shadow:0 0 6px #000}
+.race-stat{font-size:.72rem;text-align:center}
+.done-badge{display:inline-block;background:#001a0d;border:1px solid var(--good);color:var(--good);border-radius:3px;padding:1px 7px;font-size:.68rem}
+/* Panels */
+.panels{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+@media(max-width:700px){.panels{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:14px}
+.panel-title{font-size:.9rem;font-weight:bold;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.panel-title.gpu{color:var(--gpu)}
+.panel-title.acc{color:var(--acc)}
+.sec{font-size:.65rem;color:var(--sub);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px;margin-top:10px}
+.canvas-wrap{position:relative;margin-bottom:6px}
+canvas{display:block;border-radius:3px;border:1px solid var(--border)}
+.buf-meter{background:#0d1020;border:1px solid #3a2000;border-radius:4px;height:36px;position:relative;overflow:hidden;margin-bottom:4px}
+.buf-fill{height:100%;background:linear-gradient(90deg,#7a2800,var(--gpu));transition:width .05s;border-radius:4px}
+.buf-text{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:.72rem;color:#fff;text-shadow:0 0 8px #000}
+.no-buf{background:#00150a;border:1px solid var(--good);border-radius:4px;height:36px;display:flex;align-items:center;justify-content:center;font-size:.78rem;color:var(--good);margin-bottom:4px}
+.phase-box{display:inline-block;padding:3px 10px;border-radius:3px;font-size:.75rem;font-weight:bold;border:1px solid;min-width:90px;text-align:center}
+.phase-IDLE{color:var(--dim);border-color:var(--dim)}
+.phase-PRELOAD,.phase-FILL{color:var(--warn);border-color:var(--warn)}
+.phase-CLEAR{color:#80c0ff;border-color:#80c0ff}
+.phase-FEED,.phase-GEMM{color:var(--acc);border-color:var(--acc)}
+.phase-DRAIN{color:#8888ff;border-color:#8888ff}
+.phase-WRITE,.phase-OUTPUT{color:var(--good);border-color:var(--good)}
+.phase-DONE{color:var(--good);border-color:var(--good)}
+.phase-STALL{color:#ff4422;border-color:#ff4422}
+.phase-SWITCH{color:var(--good);border-color:var(--good)}
+.stat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-top:8px}
+.stat-card{background:#0a0e1c;border:1px solid var(--border);border-radius:4px;padding:6px 8px}
+.stat-val{font-size:1.1rem;font-weight:bold}
+.stat-lbl{font-size:.62rem;color:var(--sub);margin-top:1px}
+.stat-val.gpu{color:var(--gpu)}
+.stat-val.acc{color:var(--acc)}
+.stat-val.good{color:var(--good)}
+.insights{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+@media(max-width:900px){.insights{grid-template-columns:repeat(2,1fr)}}
+.insight{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px;text-align:center}
+.insight-val{font-size:1.5rem;font-weight:bold;color:var(--acc)}
+.insight-lbl{font-size:.65rem;color:var(--sub);margin-top:3px}
+/* Multi-layer timeline */
+.tl-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.tl-label{font-size:.72rem;width:80px;text-align:right;flex-shrink:0;padding-right:6px}
+.tl-canvas-wrap{flex:1;position:relative}
+.tl-stat{font-size:.7rem;min-width:130px;text-align:center}
+.stall-badge{display:inline-block;background:#2a0000;border:1px solid #ff3300;border-radius:3px;padding:1px 8px;font-size:.75rem;color:#ff6644}
+.switch-badge{display:inline-block;background:#001a00;border:1px solid var(--good);border-radius:3px;padding:1px 8px;font-size:.75rem;color:var(--good)}
+.legend{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;font-size:.67rem;color:var(--sub);margin:10px 0}
+.leg-dot{display:inline-block;width:11px;height:10px;border-radius:2px;margin-right:3px;vertical-align:middle}
+footer{text-align:center;font-size:.65rem;color:var(--dim);margin-top:8px}
+</style>
+</head>
+<body>
+
+<h1>SD-Acc vs Traditional GPU <span class="badge">RTL SIM REPLAY</span></h1>
+<p class="subtitle">Addressing both hardware bottlenecks: im2col memory overhead &amp; heterogeneous conv/matmul switching</p>
+
+<div class="tabs">
+  <button class="tab-btn active" data-tab="tab-single">① Single Conv Layer — Im2col Overhead</button>
+  <button class="tab-btn" data-tab="tab-multi">② Multi-Layer U-Net Sequence — Heterogeneous Ops</button>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- TAB 1: Single Layer                                                        -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div id="tab-single" class="tab-section active">
+
+<p class="subtitle" style="margin-bottom:14px">
+  Cycle-accurate replay of <strong>conv_controller.sv</strong> on 4×4 INT8 systolic array •
+  8×8×4 → 3×3 conv → 8×8×4 • Verified by Verilator 5.048 (256/256 ✓)
+</p>
+
+<div class="controls">
+  <button class="play-btn" id="btn-play">▶ Play</button>
+  <button id="btn-reset">↺ Reset</button>
+  <div class="speed-wrap">Speed <input type="range" id="speed" min="1" max="200" value="30">
+    <span id="speed-lbl">30×</span></div>
+  <div class="cyc-disp" id="cycle-disp">Cycle: 0 / 11,777</div>
+</div>
+
+<div class="race">
+  <span class="race-label gpu">GPU (im2col)</span>
+  <div class="track"><div class="fill gpu" id="gpu-fill" style="width:0%">
+    <span class="fill-label" id="gpu-fill-lbl"></span></div></div>
+  <span class="race-stat" id="gpu-stat" style="color:var(--gpu)">0 / 11,777</span>
+  <span class="race-label acc">SD-Acc</span>
+  <div class="track"><div class="fill acc" id="acc-fill" style="width:0%">
+    <span class="fill-label" id="acc-fill-lbl"></span></div></div>
+  <span class="race-stat" id="acc-stat" style="color:var(--acc)">0 / 3,298</span>
+</div>
+
+<div class="panels">
+  <div class="panel">
+    <div class="panel-title gpu">⚠ Traditional GPU — Im2col + GEMM</div>
+    <div class="sec">Phase</div>
+    <div id="gpu-phase" class="phase-box phase-IDLE">IDLE</div>
+    <div style="font-size:.68rem;color:var(--sub);margin-top:3px">
+      Pixel (<span id="gpu-oh">0</span>,<span id="gpu-ow">0</span>)&nbsp;|&nbsp;Step <span id="gpu-step">—</span>
+    </div>
+    <div class="sec">Input SRAM → Im2col Buffer (2,304 bytes)</div>
+    <div class="buf-meter">
+      <div class="buf-fill" id="gpu-buf-fill" style="width:0%"></div>
+      <div class="buf-text" id="gpu-buf-text">0 / 2,304 bytes written</div>
+    </div>
+    <div class="sec">Input SRAM (8×8×4 = 256 activations)</div>
+    <div class="canvas-wrap"><canvas id="c-gpu-in" width="256" height="64"></canvas></div>
+    <div class="sec">Im2col Buffer (2,304 entries, 48×48)</div>
+    <div class="canvas-wrap"><canvas id="c-gpu-buf" width="256" height="256"></canvas></div>
+    <div class="sec">Output SRAM (8×8×4 = 256 results)</div>
+    <div class="canvas-wrap"><canvas id="c-gpu-out" width="256" height="64"></canvas></div>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-val gpu" id="g-buf">0</div><div class="stat-lbl">Buffer bytes written</div></div>
+      <div class="stat-card"><div class="stat-val gpu" id="g-wrds">0</div><div class="stat-lbl">Weight re-reads</div></div>
+      <div class="stat-card"><div class="stat-val gpu" id="g-inp">0</div><div class="stat-lbl">Input SRAM reads</div></div>
+      <div class="stat-card"><div class="stat-val gpu" id="g-out">0</div><div class="stat-lbl">Outputs written</div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title acc">✓ SD-Acc — Address-Centric Systolic Array</div>
+    <div class="sec">FSM State</div>
+    <div id="acc-phase" class="phase-box phase-IDLE">IDLE</div>
+    <div style="font-size:.68rem;color:var(--sub);margin-top:3px">
+      Pixel (<span id="acc-oh">0</span>,<span id="acc-ow">0</span>)&nbsp;|&nbsp;Step <span id="acc-step">—</span>
+    </div>
+    <div class="sec">No Intermediate Buffer ← Key Saving</div>
+    <div class="no-buf">⚡ 0 bytes — address_gen computes positions on-the-fly</div>
+    <div class="sec">Input SRAM (8×8×4 = 256 activations)</div>
+    <div class="canvas-wrap"><canvas id="c-acc-in" width="256" height="64"></canvas></div>
+    <div class="sec">4×4 Systolic PE Array</div>
+    <div class="canvas-wrap"><canvas id="c-pe" width="256" height="96"></canvas></div>
+    <div class="sec">Output SRAM (8×8×4 = 256 results)</div>
+    <div class="canvas-wrap"><canvas id="c-acc-out" width="256" height="64"></canvas></div>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-val good">0</div><div class="stat-lbl">Buffer bytes written</div></div>
+      <div class="stat-card"><div class="stat-val acc" id="a-wrds">0</div><div class="stat-lbl">Weight reads (once)</div></div>
+      <div class="stat-card"><div class="stat-val acc" id="a-inp">0</div><div class="stat-lbl">Input SRAM reads</div></div>
+      <div class="stat-card"><div class="stat-val acc" id="a-out">0</div><div class="stat-lbl">Outputs written</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="insights">
+  <div class="insight"><div class="insight-val" id="ins-speedup">—</div><div class="insight-lbl">Cycle speedup (so far)</div></div>
+  <div class="insight"><div class="insight-val" style="color:var(--good)">0 bytes</div><div class="insight-lbl">Intermediate buffer (SD-Acc)</div></div>
+  <div class="insight"><div class="insight-val" id="ins-wrd">32×</div><div class="insight-lbl">Fewer weight reads</div></div>
+  <div class="insight"><div class="insight-val" id="ins-inp">16%</div><div class="insight-lbl">Fewer input SRAM reads</div></div>
+</div>
+
+<footer>
+  Simulation source: conv_controller.sv · systolic_array_4x4.sv · conv_addr_gen.sv
+  | Tool: Verilator 5.048 | 256/256 INT32 outputs verified against golden reference
+</footer>
+
+</div><!-- end tab-single -->
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- TAB 2: Multi-Layer Heterogeneous                                           -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div id="tab-multi" class="tab-section">
+
+<p class="subtitle" style="margin-bottom:14px">
+  3-layer U-Net slice: <strong>Conv → Self-Attention (Matmul) → Conv</strong> •
+  GPU pays kernel-switch stall on every boundary • SD-Acc flips a mode register in 5 cycles
+</p>
+
+<div class="controls">
+  <button class="play-btn" id="ml-btn-play">▶ Play</button>
+  <button id="ml-btn-reset">↺ Reset</button>
+  <div class="speed-wrap">Speed <input type="range" id="ml-speed" min="1" max="500" value="80">
+    <span id="ml-speed-lbl">80×</span></div>
+  <div class="cyc-disp" id="ml-cycle-disp">Cycle: 0 / 29,250</div>
+</div>
+
+<!-- Timeline bars (shared x-axis = GPU total cycles) -->
+<div style="margin-bottom:16px">
+  <div class="tl-row">
+    <span class="tl-label gpu">GPU</span>
+    <div class="tl-canvas-wrap">
+      <canvas id="c-ml-gpu" width="700" height="40" style="width:100%;display:block;border:1px solid var(--border);border-radius:3px"></canvas>
+    </div>
+    <span class="tl-stat" id="ml-gpu-stat" style="color:var(--gpu)">0 / 29,250</span>
+  </div>
+  <div class="tl-row">
+    <span class="tl-label acc">SD-Acc</span>
+    <div class="tl-canvas-wrap">
+      <canvas id="c-ml-acc" width="700" height="40" style="width:100%;display:block;border:1px solid var(--border);border-radius:3px"></canvas>
+    </div>
+    <span class="tl-stat" id="ml-acc-stat" style="color:var(--acc)">0 / 7,806</span>
+  </div>
+</div>
+
+<div class="legend">
+  <span><span class="leg-dot" style="background:#993300"></span>Conv2d (im2col+GEMM)</span>
+  <span><span class="leg-dot" style="background:#ff2200"></span>Kernel Switch STALL</span>
+  <span><span class="leg-dot" style="background:#bb5500"></span>Attn Matmul (cuBLAS)</span>
+  <span><span class="leg-dot" style="background:#006688"></span>Conv2d (addr-centric)</span>
+  <span><span class="leg-dot" style="background:#00cc66"></span>Mode Switch (5 cyc)</span>
+  <span><span class="leg-dot" style="background:#004d88"></span>Attn Matmul (systolic)</span>
+  <span><span class="leg-dot" style="background:#004400"></span>SD-Acc DONE (idle)</span>
+</div>
+
+<!-- Current operation panels -->
+<div class="panels" style="margin-bottom:12px">
+  <div class="panel">
+    <div class="panel-title gpu">GPU — Current Operation</div>
+    <div id="ml-gpu-phase" class="phase-box phase-IDLE" style="margin-bottom:10px">IDLE</div>
+    <div style="font-size:.75rem;color:var(--sub);margin-bottom:6px">Stall cycles accumulated:</div>
+    <div><span class="stall-badge" id="ml-stall-cyc">0</span>
+      <span style="font-size:.68rem;color:var(--sub);margin-left:8px">wasted waiting for kernel re-launch</span></div>
+    <div style="margin-top:10px;font-size:.68rem;color:var(--sub)">
+      Each GPU kernel switch: teardown cuDNN ctx → setup cuBLAS ctx → reformat memory layout
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title acc">SD-Acc — Current Operation</div>
+    <div id="ml-acc-phase" class="phase-box phase-IDLE" style="margin-bottom:10px">IDLE</div>
+    <div style="font-size:.75rem;color:var(--sub);margin-bottom:6px">Mode-switch cycles used:</div>
+    <div><span class="switch-badge" id="ml-switch-cyc">0</span>
+      <span style="font-size:.68rem;color:var(--sub);margin-left:8px">single register write: mode ← MATMUL</span></div>
+    <div style="margin-top:10px;font-size:.68rem;color:var(--sub)">
+      Same 4×4 systolic array — only the address controller changes
+    </div>
+  </div>
+</div>
+
+<div class="insights">
+  <div class="insight"><div class="insight-val" id="ml-speedup">—</div><div class="insight-lbl">Total cycle speedup</div></div>
+  <div class="insight"><div class="insight-val" style="color:var(--gpu)">1,600</div><div class="insight-lbl">GPU stall cycles (2 switches × 800)</div></div>
+  <div class="insight"><div class="insight-val" style="color:var(--good)">10</div><div class="insight-lbl">SD-Acc switch cycles (2 switches × 5)</div></div>
+  <div class="insight"><div class="insight-val" style="color:var(--warn)">160×</div><div class="insight-lbl">Faster context switch</div></div>
+</div>
+
+<footer>
+  Multi-layer model: 3-layer U-Net slice (Conv→Attn→Conv) •
+  GPU: im2col model (RTL-verified 11,777 cyc/conv) + cuBLAS matmul (4,096 cyc) + kernel-switch overhead (800 cyc, literature) •
+  SD-Acc: RTL-verified conv (3,298 cyc) + systolic matmul model (1,200 cyc) + mode register flip (5 cyc)
+</footer>
+
+</div><!-- end tab-multi -->
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// TAB 1 — Single Layer (RTL trace replay)
+// ═══════════════════════════════════════════════════════════════════
+const M    = SIM_DATA.meta;
+const ACYC = M.accel_total_cycles;
+const ICYC = M.im2col_total_cycles;
+const AEV  = SIM_DATA.accel_events;
+const IEV  = SIM_DATA.im2col_events;
+
+const aIdx = new Int32Array(ACYC + 2);
+const iIdx = new Int32Array(ICYC + 2);
+(function(){
+  let ai=0,ii=0;
+  for(let c=0;c<=ACYC;c++){while(ai+1<AEV.length&&AEV[ai+1].cycle<=c)ai++;aIdx[c]=ai;}
+  for(let c=0;c<=ICYC;c++){while(ii+1<IEV.length&&IEV[ii+1].cycle<=c)ii++;iIdx[c]=ii;}
+})();
+function accelAt(c){return AEV[aIdx[Math.min(c,ACYC)]];}
+function im2colAt(c){return IEV[iIdx[Math.min(c,ICYC)]];}
+
+const STEP=8;
+const aCum={inp:[],wrds:[],out:[]};
+const iCum={inp:[],wrds:[],buf:[],out:[]};
+(function(){
+  let aw=0,aa=0,ao=0,iw=0,ia=0,ib=0,io=0;
+  for(let c=0;c<=Math.max(ACYC,ICYC);c++){
+    if(c<=ACYC){const e=accelAt(c);aw+=e.weight_re||0;aa+=e.input_re||0;ao+=e.output_we||0;}
+    if(c<=ICYC){const e=im2colAt(c);iw+=e.weight_re||0;ia+=e.input_re||0;ib+=e.buf_write||0;io+=e.output_we||0;}
+    if(c%STEP===0){aCum.inp.push(aa);aCum.wrds.push(aw);aCum.out.push(ao);iCum.inp.push(ia);iCum.wrds.push(iw);iCum.buf.push(ib);iCum.out.push(io);}
+  }
+})();
+function aStats(c){const i=Math.min(Math.floor(c/STEP),aCum.inp.length-1);return{inp:aCum.inp[i],wrds:aCum.wrds[i],out:aCum.out[i]};}
+function iStats(c){const i=Math.min(Math.floor(c/STEP),iCum.inp.length-1);return{inp:iCum.inp[i],wrds:iCum.wrds[i],buf:iCum.buf[i],out:iCum.out[i]};}
+
+const cgi=document.getElementById('c-gpu-in'),cgb=document.getElementById('c-gpu-buf'),cgo=document.getElementById('c-gpu-out');
+const cai=document.getElementById('c-acc-in'),cpe=document.getElementById('c-pe'),cao=document.getElementById('c-acc-out');
+const[xgi,xgb,xgo,xai,xpe,xao]=[cgi,cgb,cgo,cai,cpe,cao].map(c=>c.getContext('2d'));
+const C_IDLE='#0d1426',C_WRITTEN='#7a2800',C_HOT_GPU='#ff5733',C_HOT_ACC='#00cfff';
+
+function drawInputSRAM(ctx,hotIdx,readSet,color){
+  ctx.fillStyle='#070b18';ctx.fillRect(0,0,256,64);
+  for(let r=0;r<8;r++)for(let c=0;c<32;c++){
+    const idx=r*32+c,hot=hotIdx===idx;
+    ctx.fillStyle=hot?color:(readSet.has(idx)?'#0d3020':C_IDLE);
+    ctx.fillRect(c*8+1,r*8+1,6,6);
+    if(hot){ctx.fillStyle=color;ctx.fillRect(c*8+2,r*8+2,4,4);}
+  }
+}
+const BUF_COLS=48,BW=256/48,BH=256/48;
+function drawBuffer(ctx,fillCount,hotAddr){
+  ctx.fillStyle='#070b18';ctx.fillRect(0,0,256,256);
+  for(let i=0;i<2304;i++){
+    const r=Math.floor(i/BUF_COLS),c=i%BUF_COLS,filled=i<fillCount,hot=i===hotAddr;
+    ctx.fillStyle=hot?C_HOT_GPU:(filled?C_WRITTEN:C_IDLE);
+    ctx.fillRect(c*BW+0.5,r*BH+0.5,BW-1,BH-1);
+  }
+}
+function drawOutputSRAM(ctx,writeCount,color){
+  ctx.fillStyle='#070b18';ctx.fillRect(0,0,256,64);
+  for(let r=0;r<8;r++)for(let c=0;c<32;c++){
+    const idx=r*32+c,done=idx<writeCount;
+    ctx.fillStyle=done?(color==='acc'?'#00aa55':'#008844'):C_IDLE;
+    ctx.fillRect(c*8+1,r*8+1,6,6);
+  }
+}
+function drawPE(ctx,active,feed_valid){
+  ctx.fillStyle='#070b18';ctx.fillRect(0,0,256,96);
+  const cw=62,ch=22,pad=2;
+  for(let r=0;r<4;r++)for(let c=0;c<4;c++){
+    const x=c*cw+2,y=r*ch+2,glow=active&&(r===0);
+    ctx.fillStyle=glow&&feed_valid?'#004466':(glow?'#002233':C_IDLE);
+    ctx.fillRect(x,y,cw-pad,ch-pad);
+    ctx.strokeStyle=glow?C_HOT_ACC:'#1e2d50';ctx.lineWidth=1;ctx.strokeRect(x,y,cw-pad,ch-pad);
+    if(glow&&feed_valid){ctx.fillStyle=C_HOT_ACC;ctx.font='9px monospace';ctx.textAlign='center';ctx.fillText('MAC',x+(cw-pad)/2,y+(ch-pad)/2+3);}
+    else if(glow){ctx.fillStyle='#336688';ctx.font='9px monospace';ctx.textAlign='center';ctx.fillText('idle',x+(cw-pad)/2,y+(ch-pad)/2+3);}
+  }
+}
+
+let sim_cycle=0,playing=false,animId=null,lastTs=null;
+const accReadSet=new Set(),gpuReadSet=new Set();
+
+function getAccInputIdx(e){
+  if(!e)return -1;
+  const oh=e.oh||0,ow=e.ow||0,step=e.step||0;
+  const ic=Math.floor(step/9),kr=Math.floor((step%9)/3),kc=step%3;
+  const ih=oh+kr-1,iw=ow+kc-1;
+  if(ih<0||ih>=8||iw<0||iw>=8)return -1;
+  return(ic*8+ih)*8+iw;
+}
+
+function render(c){
+  const ac=Math.min(c,ACYC),ic_c=Math.min(c,ICYC);
+  const ae=accelAt(ac),ie=im2colAt(ic_c),as=aStats(ac),is=iStats(ic_c);
+  document.getElementById('cycle-disp').textContent=`Cycle: ${c.toLocaleString()} / ${Math.max(ACYC,ICYC).toLocaleString()}`;
+  document.getElementById('gpu-fill').style.width=Math.min(100,ic_c/ICYC*100)+'%';
+  document.getElementById('acc-fill').style.width=Math.min(100,ac/ACYC*100)+'%';
+  const accDone=ac>=ACYC,gpuDone=ic_c>=ICYC;
+  document.getElementById('acc-stat').innerHTML=accDone?'<span class="done-badge">✓ DONE</span> '+ACYC.toLocaleString():ac.toLocaleString()+' / '+ACYC.toLocaleString();
+  document.getElementById('gpu-stat').innerHTML=gpuDone?'<span class="done-badge">✓ DONE</span> '+ICYC.toLocaleString():ic_c.toLocaleString()+' / '+ICYC.toLocaleString();
+  document.getElementById('acc-fill-lbl').textContent=accDone?'DONE ✓':'';
+  document.getElementById('gpu-fill-lbl').textContent=gpuDone?'DONE ✓':'';
+  const gph=ie.phase||'IDLE';
+  const gpStep=gph==='FILL'?(ie.buf_addr||0):(gph==='GEMM'?((ie.buf_addr||0)%36):'—');
+  document.getElementById('gpu-phase').textContent=gph;document.getElementById('gpu-phase').className='phase-box phase-'+gph;
+  document.getElementById('gpu-oh').textContent=ie.oh||0;document.getElementById('gpu-ow').textContent=ie.ow||0;document.getElementById('gpu-step').textContent=gpStep;
+  const aph=ae.state||'IDLE';
+  document.getElementById('acc-phase').textContent=aph;document.getElementById('acc-phase').className='phase-box phase-'+aph;
+  document.getElementById('acc-oh').textContent=ae.oh||0;document.getElementById('acc-ow').textContent=ae.ow||0;
+  document.getElementById('acc-step').textContent=aph==='FEED'?(ae.step||0):'—';
+  const bufFill=is.buf;
+  document.getElementById('gpu-buf-fill').style.width=bufFill/2304*100+'%';
+  document.getElementById('gpu-buf-text').textContent=`${bufFill.toLocaleString()} / 2,304 bytes written`;
+  document.getElementById('g-buf').textContent=bufFill.toLocaleString();
+  document.getElementById('g-wrds').textContent=is.wrds.toLocaleString();
+  document.getElementById('g-inp').textContent=is.inp.toLocaleString();
+  document.getElementById('g-out').textContent=is.out.toLocaleString();
+  document.getElementById('a-wrds').textContent=as.wrds.toLocaleString();
+  document.getElementById('a-inp').textContent=as.inp.toLocaleString();
+  document.getElementById('a-out').textContent=as.out.toLocaleString();
+  if(ac>0){
+    document.getElementById('ins-speedup').textContent=(ic_c/Math.max(ac,1)).toFixed(2)+'×';
+    document.getElementById('ins-wrd').textContent=(is.wrds/Math.max(as.wrds,1)).toFixed(0)+'×';
+    const savedPct=as.inp>0?Math.round((1-as.inp/(is.inp||1))*100):16;
+    document.getElementById('ins-inp').textContent=Math.max(0,savedPct)+'%';
+  }
+  if(ae.input_re&&ae.addr_valid){const idx=getAccInputIdx(ae);if(idx>=0)accReadSet.add(idx%256);}
+  if(ie.input_re){gpuReadSet.add(((ie.oh||0)*8+(ie.ow||0))%256);}
+  const gpuHotIdx=gph==='FILL'?((ie.oh||0)*8+(ie.ow||0))%256:-1;
+  drawInputSRAM(xgi,gpuHotIdx,gpuReadSet,C_HOT_GPU);
+  drawBuffer(xgb,bufFill,gph==='FILL'?(ie.buf_addr||0):-1);
+  drawOutputSRAM(xgo,is.out,'gpu');
+  drawInputSRAM(xai,ae.input_re?(getAccInputIdx(ae)+256)%256:-1,accReadSet,C_HOT_ACC);
+  drawPE(xpe,aph==='FEED',ae.addr_valid===1);
+  drawOutputSRAM(xao,as.out,'acc');
+}
+
+function tick(ts){
+  if(!lastTs)lastTs=ts;
+  const dt=ts-lastTs;lastTs=ts;
+  const speed=parseInt(document.getElementById('speed').value);
+  sim_cycle=Math.min(sim_cycle+Math.max(1,Math.round(speed*dt/16.67)),Math.max(ACYC,ICYC));
+  render(sim_cycle);
+  if(sim_cycle<Math.max(ACYC,ICYC)){animId=requestAnimationFrame(tick);}
+  else{playing=false;document.getElementById('btn-play').textContent='▶ Done';}
+}
+document.getElementById('btn-play').addEventListener('click',()=>{
+  if(playing){playing=false;cancelAnimationFrame(animId);document.getElementById('btn-play').textContent='▶ Play';}
+  else{playing=true;lastTs=null;document.getElementById('btn-play').textContent='⏸ Pause';animId=requestAnimationFrame(tick);}
+});
+document.getElementById('btn-reset').addEventListener('click',()=>{
+  playing=false;cancelAnimationFrame(animId);sim_cycle=0;lastTs=null;accReadSet.clear();gpuReadSet.clear();render(0);document.getElementById('btn-play').textContent='▶ Play';
+});
+document.getElementById('speed').addEventListener('input',function(){document.getElementById('speed-lbl').textContent=this.value+'×';});
+render(0);
+
+// ═══════════════════════════════════════════════════════════════════
+// TAB 2 — Multi-Layer Heterogeneous Simulation (synthetic model)
+// ═══════════════════════════════════════════════════════════════════
+const ML_GPU_TOTAL = 29250;
+const ML_ACC_TOTAL = 7806;
+
+// GPU timeline: conv1 | STALL | matmul | STALL | conv2
+const ML_GPU_SEGS = [
+  {label:'Conv Layer 1',  type:'conv',   start:0,     end:11776, color:'#8b2200'},
+  {label:'KERNEL SWITCH', type:'stall',  start:11777, end:12576, color:'#ff2200'},
+  {label:'Attn Matmul',   type:'matmul', start:12577, end:16672, color:'#994400'},
+  {label:'KERNEL SWITCH', type:'stall',  start:16673, end:17472, color:'#ff2200'},
+  {label:'Conv Layer 3',  type:'conv',   start:17473, end:29249, color:'#8b2200'},
+];
+// SD-Acc timeline: conv1 | switch | matmul | switch | conv2
+const ML_ACC_SEGS = [
+  {label:'Conv Layer 1',  type:'conv',   start:0,    end:3297,  color:'#006688'},
+  {label:'MODE=MATMUL',   type:'switch', start:3298, end:3302,  color:'#00cc66'},
+  {label:'Attn Matmul',   type:'matmul', start:3303, end:4502,  color:'#004d88'},
+  {label:'MODE=CONV',     type:'switch', start:4503, end:4507,  color:'#00cc66'},
+  {label:'Conv Layer 3',  type:'conv',   start:4508, end:7805,  color:'#006688'},
+];
+
+function getSegAt(segs, c){
+  for(const s of segs) if(c>=s.start&&c<=s.end) return s;
+  return segs[segs.length-1];
+}
+
+function drawMLTimeline(canvasId, segs, playhead, isAcc){
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const TOTAL = ML_GPU_TOTAL;
+  ctx.fillStyle='#070b18'; ctx.fillRect(0,0,W,H);
+
+  if(isAcc && playhead >= ML_ACC_TOTAL){
+    // Draw completed acc segments
+    for(const s of segs){
+      const x1=s.start/TOTAL*W, x2=s.end/TOTAL*W, w=Math.max(1,x2-x1);
+      ctx.fillStyle=s.color; ctx.globalAlpha=0.5;
+      ctx.fillRect(x1,2,w-1,H-4);
+    }
+    ctx.globalAlpha=1;
+    // Green DONE fill for remaining
+    const doneX = ML_ACC_TOTAL/TOTAL*W;
+    ctx.fillStyle='#003322'; ctx.fillRect(doneX,1,W-doneX-1,H-2);
+    ctx.fillStyle='#00ff88'; ctx.font='bold 11px monospace'; ctx.textAlign='center';
+    ctx.fillText('DONE ✓  (GPU still running...)', doneX+(W-doneX)/2, H/2+4);
+  } else {
+    for(const s of segs){
+      const x1=s.start/TOTAL*W, x2=s.end/TOTAL*W, w=Math.max(1,x2-x1);
+      let col=s.color;
+      // Flash stall segments red
+      if(s.type==='stall' && playhead>=s.start && playhead<=s.end){
+        col=((Date.now()/250|0)%2)?'#ff2200':'#991100';
+      }
+      ctx.fillStyle=col; ctx.fillRect(x1,2,w-1,H-4);
+      if(w>50){
+        ctx.fillStyle=s.type==='stall'?'#ffcccc':'rgba(255,255,255,0.85)';
+        ctx.font='9px monospace'; ctx.textAlign='center';
+        ctx.fillText(s.label.substring(0,14), x1+w/2, H/2+4);
+      }
+    }
+  }
+
+  // Playhead
+  const ph = Math.min(playhead, TOTAL)/TOTAL*W;
+  ctx.strokeStyle='#ffffff'; ctx.lineWidth=1.5; ctx.globalAlpha=0.85;
+  ctx.beginPath(); ctx.moveTo(ph,0); ctx.lineTo(ph,H); ctx.stroke();
+  ctx.globalAlpha=1;
+}
+
+let ml_cycle=0, ml_playing=false, ml_animId=null, ml_lastTs=null;
+
+function renderML(c){
+  const gpuC = Math.min(c, ML_GPU_TOTAL);
+  const accDone = c >= ML_ACC_TOTAL;
+  const gpuDone = c >= ML_GPU_TOTAL;
+  const gpuSeg = getSegAt(ML_GPU_SEGS, gpuC);
+  const accSeg = accDone ? null : getSegAt(ML_ACC_SEGS, Math.min(c, ML_ACC_TOTAL));
+
+  document.getElementById('ml-cycle-disp').textContent = `Cycle: ${c.toLocaleString()} / ${ML_GPU_TOTAL.toLocaleString()}`;
+
+  // GPU current op
+  const gpuEl = document.getElementById('ml-gpu-phase');
+  if(gpuDone){ gpuEl.textContent='DONE'; gpuEl.className='phase-box phase-DONE'; }
+  else if(gpuSeg.type==='stall'){ gpuEl.textContent='KERNEL SWITCH ⚠'; gpuEl.className='phase-box phase-STALL'; }
+  else if(gpuSeg.type==='matmul'){ gpuEl.textContent='Attn Matmul'; gpuEl.className='phase-box phase-GEMM'; }
+  else { gpuEl.textContent=gpuSeg.label; gpuEl.className='phase-box phase-FEED'; }
+
+  // SD-Acc current op
+  const accEl = document.getElementById('ml-acc-phase');
+  if(accDone){ accEl.textContent='DONE ✓'; accEl.className='phase-box phase-DONE'; }
+  else if(accSeg.type==='switch'){ accEl.textContent=accSeg.label; accEl.className='phase-box phase-SWITCH'; }
+  else if(accSeg.type==='matmul'){ accEl.textContent='Attn Matmul'; accEl.className='phase-box phase-FEED'; }
+  else { accEl.textContent=accSeg.label; accEl.className='phase-box phase-FEED'; }
+
+  // Stall counter
+  let stallCyc=0;
+  for(const s of ML_GPU_SEGS){
+    if(s.type==='stall'){
+      if(c>=s.end) stallCyc+=(s.end-s.start+1);
+      else if(c>=s.start) stallCyc+=(c-s.start);
+    }
+  }
+  document.getElementById('ml-stall-cyc').textContent = stallCyc.toLocaleString()+' cycles';
+
+  // Switch counter
+  let switchCyc=0;
+  for(const s of ML_ACC_SEGS){
+    if(s.type==='switch'){
+      if(c>=s.end) switchCyc+=(s.end-s.start+1);
+      else if(c>=s.start) switchCyc+=(c-s.start);
+    }
+  }
+  document.getElementById('ml-switch-cyc').textContent = switchCyc.toLocaleString()+' cycles';
+
+  // Speedup
+  const accProgress = Math.min(c, ML_ACC_TOTAL);
+  if(accProgress>100) document.getElementById('ml-speedup').textContent=(gpuC/accProgress).toFixed(2)+'×';
+
+  // Race stats
+  document.getElementById('ml-gpu-stat').innerHTML = gpuDone
+    ? '<span class="done-badge">✓ DONE</span> '+ML_GPU_TOTAL.toLocaleString()
+    : gpuC.toLocaleString()+' / '+ML_GPU_TOTAL.toLocaleString();
+  document.getElementById('ml-acc-stat').innerHTML = accDone
+    ? '<span class="done-badge">✓ DONE</span> '+ML_ACC_TOTAL.toLocaleString()
+    : Math.min(c,ML_ACC_TOTAL).toLocaleString()+' / '+ML_ACC_TOTAL.toLocaleString();
+
+  drawMLTimeline('c-ml-gpu', ML_GPU_SEGS, c, false);
+  drawMLTimeline('c-ml-acc', ML_ACC_SEGS, c, true);
+}
+
+function tickML(ts){
+  if(!ml_lastTs) ml_lastTs=ts;
+  const dt=ts-ml_lastTs; ml_lastTs=ts;
+  const speed=parseInt(document.getElementById('ml-speed').value);
+  ml_cycle=Math.min(ml_cycle+Math.max(1,Math.round(speed*dt/16.67)),ML_GPU_TOTAL);
+  renderML(ml_cycle);
+  if(ml_cycle<ML_GPU_TOTAL){ml_animId=requestAnimationFrame(tickML);}
+  else{ml_playing=false;document.getElementById('ml-btn-play').textContent='▶ Done';}
+}
+document.getElementById('ml-btn-play').addEventListener('click',()=>{
+  if(ml_playing){ml_playing=false;cancelAnimationFrame(ml_animId);document.getElementById('ml-btn-play').textContent='▶ Play';}
+  else{ml_playing=true;ml_lastTs=null;document.getElementById('ml-btn-play').textContent='⏸ Pause';ml_animId=requestAnimationFrame(tickML);}
+});
+document.getElementById('ml-btn-reset').addEventListener('click',()=>{
+  ml_playing=false;cancelAnimationFrame(ml_animId);ml_cycle=0;ml_lastTs=null;renderML(0);document.getElementById('ml-btn-play').textContent='▶ Play';
+});
+document.getElementById('ml-speed').addEventListener('input',function(){document.getElementById('ml-speed-lbl').textContent=this.value+'×';});
+renderML(0);
+
+// ═══════════════════════════════════════════════════════════════════
+// Tab switching
+// ═══════════════════════════════════════════════════════════════════
+document.querySelectorAll('.tab-btn').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.tab-section').forEach(s=>s.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab).classList.add('active');
+    if(btn.dataset.tab==='tab-single'&&ml_playing){ml_playing=false;cancelAnimationFrame(ml_animId);document.getElementById('ml-btn-play').textContent='▶ Play';}
+    if(btn.dataset.tab==='tab-multi'&&playing){playing=false;cancelAnimationFrame(animId);document.getElementById('btn-play').textContent='▶ Play';}
+    if(btn.dataset.tab==='tab-multi') renderML(ml_cycle);
+  });
+});
+</script>
+</body>
+</html>

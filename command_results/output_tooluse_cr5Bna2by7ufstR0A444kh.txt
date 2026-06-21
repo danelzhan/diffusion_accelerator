@@ -1,0 +1,19 @@
+=== Command: cd /Users/enluia/Documents/projects/diffusion_accelerator && python3 generate_trace.py (2026-06-21T17:04:22.303Z) ===
+Exit Code: 1
+Output:
+Simulating conv_controller FSM...
+  Accelerator: 3298 cycles
+Simulating im2col baseline...
+  Im2col:      11777 cycles
+
+Stats (should match hardware simulation):
+  Accel  — cycles: 3298  input_reads: 1985  weight_reads: 288  outputs:256
+  Im2col — cycles:11777  input_reads: 1936  weight_reads: 9216  buf_bytes: 2304
+Traceback (most recent call last):
+  File [35m"/Users/enluia/Documents/projects/diffusion_accelerator/generate_trace.py"[0m, line [35m296[0m, in [35m<module>[0m
+    assert [1;31mstats['accel']['input_reads']  == 1936[0m, f"Expected 1936, got {stats['accel']['input_reads']}"
+           [1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1;35mAssertionError[0m: [35mExpected 1936, got 1985[0m
+
+=== End Output ===
+
